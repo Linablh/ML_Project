@@ -17,6 +17,7 @@ from sklearn.model_selection import GridSearchCV
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import KFold, StratifiedKFold
+from sklearn.metrics import r2_score, roc_auc_score
 
 
 parser = argparse.ArgumentParser(
@@ -31,7 +32,7 @@ parser.add_argument("--fed_data", type=str, default="avg Federal Funds Effective
 parser.add_argument("--feature_set", type=str, default="enriched", help="Choose 'baseline' or 'enriched'")
 parser.add_argument("--task", type=str, default="regression", help="Choose 'regression' or 'classification'")
 parser.add_argument("--ml_method", type=str, default="RandomForest", help="Model to use: 'RandomForest', 'LinearRegression', or 'Ridge'")
-parser.add_argument("--rf_n_estimators", type=int, default=100, help="Number of trees (if RandomForest is selected)")
+#parser.add_argument("--rf_n_estimators", type=int, default=100, help="Number of trees (if RandomForest is selected)")
 parser.add_argument("--cv_nsplits", type=int, default=5, help="Number of splits for cross-validation")
 parser.add_argument("--save_dir", type=str, default="outputs", help="Directory where models and logs will be saved")
 
@@ -113,7 +114,7 @@ if args.feature_set == "baseline":
 elif args.feature_set == "enriched":
     print("Using enriched features (With Macro and  Engineered features)... ")
     #here we take all the columns added + base columns 
-    numerical_cols = ['QBFASSET', 'QBFDEP', 'Deposit_to_Asset_Ratio', 'State_Failures_Last_12M', 'YEAR', 'UNRATE', 'FEDFUNDS']
+    numerical_cols = ['QBFASSET', 'QBFDEP', 'Deposit_to_Asset_Ratio', 'State_Failures_Last_12M', 'UNRATE', 'FEDFUNDS'] #without year 
     categorical_cols = ['CHCLASS1', 'RESTYPE1', 'SAVR', 'STATE']
     
 else:
@@ -140,6 +141,13 @@ else:
 
 X = df_final[features]
 y = df_final[target_name]
+from sklearn.model_selection import train_test_split
+
+#Create X_train and X_test 
+if args.task == "classification":
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+else:
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
 # ColumnTransformer: scaling and one-hot encoding
 preprocess = ColumnTransformer([
@@ -193,7 +201,7 @@ print(f"-------Training and optimizing model: {args.ml_method.upper()} ---------
 if param_grid:
     print(f"Searching for best hyperparameters ({args.cv_nsplits}-fold CV)...")
     grid_search = GridSearchCV(pipeline, param_grid=param_grid, cv=cv_strategy,scoring=scoring_metric, n_jobs=-1)
-    grid_search.fit(X, y)
+    grid_search.fit(X_train, y_train)
     
     final_model = grid_search.best_estimator_
     mean_score = grid_search.best_score_
@@ -205,12 +213,17 @@ if param_grid:
 
 else:
     print(f"Evaluating model ({args.cv_nsplits}-fold CV)...")
-    lst_scores = cross_val_score(pipeline, X, y, cv=cv_strategy, scoring='r2')
+    lst_scores = cross_val_score(pipeline, X_train, y_train, cv=cv_strategy, scoring=scoring_metric)
     mean_score = np.mean(lst_scores)
-
-    final_model = pipeline.fit(X, y)
+    final_model = pipeline.fit(X_train, y_train)
     best_params = "None" #no GridSearch for those models 
 
+if args.task == "regression":
+        y_pred = final_model.predict(X_test)
+        test_score = r2_score(y_test, y_pred)
+else:
+        y_pred_proba = final_model.predict_proba(X_test)[:, 1]
+        test_score = roc_auc_score(y_test, y_pred_proba)
 
 # Save model
 with open(path_model, 'wb') as f:
@@ -218,16 +231,14 @@ with open(path_model, 'wb') as f:
 
 # Save the metrics and configuration to logs.json
 results = {
-    "task": args.task,
-    "model_used": args.ml_method,
-    "feature_set": args.feature_set,
-    "scoring_metric": scoring_metric,
-    "mean_score": mean_score,
-    "best_parameters": best_params
-}
-#saving
-with open(path_model, 'wb') as f:
-    pickle.dump(final_model, f)
+        "task": args.task,
+        "model_used": args.ml_method,
+        "feature_set": args.feature_set,
+        "scoring_metric": scoring_metric,
+        "mean_cv_score": mean_score,
+        "test_score": test_score, 
+        "best_parameters": best_params
+    }
 
 with open(path_logs, "w") as f:
     json.dump(results, f, indent=4)
@@ -238,4 +249,5 @@ RESET = '\033[0m'
 
 # --- Affichage Final ---
 print(f"\n{GREEN}--> Success:{RESET} Model and logs saved in: {out_dir}")
-print(f"{BLUE}-->{RESET} Final Score ({scoring_metric}): {mean_score:.4f}\n")
+print(f"{BLUE}-->{RESET} Final CV Score ({scoring_metric}): {mean_score:.4f}")
+print(f"{BLUE}-->{RESET} Final TEST Score: {test_score:.4f}\n")

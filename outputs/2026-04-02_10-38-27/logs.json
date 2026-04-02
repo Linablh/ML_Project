@@ -1,0 +1,10 @@
+{
+    "task": "regression",
+    "model_used": "Lasso",
+    "feature_set": "enriched",
+    "scoring_metric": "r2",
+    "mean_score": 0.5538756059141472,
+    "best_parameters": {
+        "model__alpha": 0.0001
+    }
+}

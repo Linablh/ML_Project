@@ -1,0 +1,11 @@
+{
+    "bank_data": "Summary_of_Results_3_18_2026.csv",
+    "unemp_data": "US_unemployment_rate.csv",
+    "fed_data": "avg Federal Funds Effective Rate.csv",
+    "feature_set": "enriched",
+    "task": "regression",
+    "ml_method": "Lasso",
+    "rf_n_estimators": 100,
+    "cv_nsplits": 5,
+    "save_dir": "outputs"
+}

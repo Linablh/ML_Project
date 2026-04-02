@@ -236,6 +236,6 @@ GREEN = '\033[92m'
 BLUE = '\033[94m'
 RESET = '\033[0m'
 
-# --- Affichage Final ---
+#render
 print(f"\n{GREEN}--> Success:{RESET} Model and logs saved in: {out_dir}")
 print(f"{BLUE}-->{RESET} Final Score ({scoring_metric}): {mean_score:.4f}\n")

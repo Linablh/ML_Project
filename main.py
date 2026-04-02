@@ -16,8 +16,10 @@ from sklearn.linear_model import LinearRegression, Ridge , Lasso
 from sklearn.model_selection import GridSearchCV
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import KFold, StratifiedKFold
 from sklearn.metrics import r2_score, roc_auc_score
+from sklearn.model_selection import TimeSeriesSplit, train_test_split
+
+
 
 
 parser = argparse.ArgumentParser(
@@ -67,21 +69,33 @@ def prepare_data(bank_path, unemp_path, fed_path):
 
     # 2. Create the target variable (LGD)
     df['LGD'] = df['COST'] / df['QBFASSET']
+    df = df[(df['LGD'] >= -0.05) & (df['LGD'] <= 1)] 
 
     # 3. Process dates and extract State
     df['FAILDATE'] = pd.to_datetime(df['FAILDATE'])
     df['YEAR'] = df['FAILDATE'].dt.year
+    df['YEAR_MONTH'] = df['FAILDATE'].dt.to_period('M')   #NEW : I CREATE THE MONTHS FOR THE FED
     df['STATE'] = df['CITYST'].str[-2:]
 
     # 4. Process and merge macroeconomic data
     unemp['YEAR'] = pd.to_datetime(unemp['observation_date']).dt.year
-    annual_unemp = unemp.groupby('YEAR')['UNRATE'].mean().reset_index()
+    unemp['MERGE_YEAR'] = unemp['YEAR'] + 1
+    annual_unemp = unemp[['MERGE_YEAR', 'UNRATE']].rename(columns={'MERGE_YEAR': 'YEAR'})
+    #annual_unemp = unemp.groupby('YEAR')['UNRATE'].mean().reset_index()
     
-    fed_rate['YEAR'] = pd.to_datetime(fed_rate['DATE']).dt.year
-    annual_fed = fed_rate.groupby('YEAR')['VALUE'].mean().reset_index().rename(columns={'VALUE': 'FEDFUNDS'})
+    fed_rate['DATE'] = pd.to_datetime(fed_rate['DATE'], dayfirst=True)
+    fed_rate = fed_rate.sort_values('DATE') 
+    fed_rate['YEAR_MONTH'] = fed_rate['DATE'].dt.to_period('M')
+    fed_monthly = fed_rate.groupby('YEAR_MONTH')['VALUE'].mean().reset_index()
+    fed_monthly['YEAR_MONTH'] = fed_monthly['YEAR_MONTH'] + 1
+    fed_monthly = fed_monthly.rename(columns={'VALUE': 'FEDFUNDS'})
+    #fed_rate['YEAR'] = pd.to_datetime(fed_rate['DATE']).dt.year
+    #annual_fed = fed_rate.groupby('YEAR')['VALUE'].mean().reset_index().rename(columns={'VALUE': 'FEDFUNDS'})
 
     df = df.merge(annual_unemp, on='YEAR', how='left')
-    df = df.merge(annual_fed, on='YEAR', how='left')
+    df = df.merge(fed_monthly, on='YEAR_MONTH', how='left')
+    #df = df.merge(annual_unemp, on='YEAR', how='left')
+    #df = df.merge(annual_fed, on='YEAR', how='left')
 
     # 5. Feature Engineering
     df['Deposit_to_Asset_Ratio'] = df['QBFDEP'] / df['QBFASSET']
@@ -98,11 +112,22 @@ def prepare_data(bank_path, unemp_path, fed_path):
                    (df['FAILDATE'] >= window_start)].shape[0]
         df.at[df.index[i], 'State_Failures_Last_12M'] = count
 
-    # Drop rows where macro data could not be matched
+    
     return df.dropna(subset=['UNRATE', 'FEDFUNDS', 'LGD'])
 
 # Execute data preparation
 df_final = prepare_data(args.bank_data, args.unemp_data, args.fed_data)
+df_final = df_final.sort_values('FAILDATE').reset_index(drop=True)  
+
+#Checking balanced or imbalanced 
+if args.task == "classification":
+    df_final['LGD_class'] = (df_final['LGD'] > 0.2).astype(int)
+    counts = df_final['LGD_class'].value_counts()
+    print(f"\n=== Class Balance ===")
+    print(f"Classe 0 (LGD <= 0.2): {counts[0]} ({counts[0]/len(df_final)*100:.1f}%)")
+    print(f"Classe 1 (LGD >  0.2): {counts[1]} ({counts[1]/len(df_final)*100:.1f}%)")
+    print(f"→ Dataset balanced, no resampling needed.\n")
+
 
 # Define Features and Target
 if args.feature_set == "baseline":
@@ -126,28 +151,29 @@ features= numerical_cols + categorical_cols
 if args.task == "regression":
     target_name = 'LGD'
     scoring_metric = 'r2'
-    cv_strategy = KFold(n_splits=args.cv_nsplits, shuffle=True, random_state=42) #bc we have sorted the data by date, we need to shuffle the cross validation
+    #cv_strategy = KFold(n_splits=args.cv_nsplits, shuffle=True, random_state=42) #bc we have sorted the data by date, we need to shuffle the cross validation
+    cv_strategy = TimeSeriesSplit(n_splits=args.cv_nsplits)
     print("Task: REGRESSION (Target: LGD, Metric: R2)")
 
 elif args.task == "classification":
-    #Create the binary target 
-    df_final['LGD_class'] = (df_final['LGD'] > 0.2).astype(int)
+    #df_final['LGD_class'] = (df_final['LGD'] > 0.2).astype(int)
     target_name = 'LGD_class'
     scoring_metric = 'roc_auc'
-    cv_strategy = StratifiedKFold(n_splits=args.cv_nsplits, shuffle=True, random_state=42) #shuffle for cross-validation
+    #cv_strategy = StratifiedKFold(n_splits=args.cv_nsplits, shuffle=True, random_state=42) #shuffle for cross-validation
+    cv_strategy = TimeSeriesSplit(n_splits=args.cv_nsplits)
     print("Task: CLASSIFICATION (Target: LGD > 0.2, Metric: ROC AUC)")
 else:
     raise ValueError("The argument --task must be 'regression' or 'classification'")
 
 X = df_final[features]
 y = df_final[target_name]
-from sklearn.model_selection import train_test_split
+
 
 #Create X_train and X_test 
-if args.task == "classification":
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
-else:
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
+print("\n=== Data Splits ===")
+print(f"Train set: {X_train.shape[0]} samples, {X_train.shape[1]} features")
+print(f"Test set: {X_test.shape[0]} samples, {X_test.shape[1]} features")
 
 # ColumnTransformer: scaling and one-hot encoding
 preprocess = ColumnTransformer([

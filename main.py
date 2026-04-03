@@ -12,7 +12,7 @@ from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.model_selection import cross_val_score
 from sklearn.ensemble import RandomForestRegressor 
-from sklearn.linear_model import LinearRegression, Ridge , Lasso
+from sklearn.linear_model import LinearRegression, Ridge , 
 from sklearn.model_selection import GridSearchCV
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression
@@ -74,7 +74,7 @@ def prepare_data(bank_path, unemp_path, fed_path):
     # 3. Process dates and extract State
     df['FAILDATE'] = pd.to_datetime(df['FAILDATE'])
     df['YEAR'] = df['FAILDATE'].dt.year
-    df['YEAR_MONTH'] = df['FAILDATE'].dt.to_period('M')   #NEW : I CREATE THE MONTHS FOR THE FED
+    df['YEAR_MONTH'] = df['FAILDATE'].dt.to_period('M')  
     df['STATE'] = df['CITYST'].str[-2:]
 
     # 4. Process and merge macroeconomic data
@@ -82,12 +82,17 @@ def prepare_data(bank_path, unemp_path, fed_path):
     unemp['MERGE_YEAR'] = unemp['YEAR'] + 1
     annual_unemp = unemp[['MERGE_YEAR', 'UNRATE']].rename(columns={'MERGE_YEAR': 'YEAR'})
     #annual_unemp = unemp.groupby('YEAR')['UNRATE'].mean().reset_index()
-    
+
+    df['CRISIS'] = (
+    df['YEAR'].between(1985, 1994) |
+    df['YEAR'].between(2008, 2012)
+    ).astype(int)
+
     fed_rate['DATE'] = pd.to_datetime(fed_rate['DATE'], dayfirst=True)
     fed_rate = fed_rate.sort_values('DATE') 
     fed_rate['YEAR_MONTH'] = fed_rate['DATE'].dt.to_period('M')
     fed_monthly = fed_rate.groupby('YEAR_MONTH')['VALUE'].mean().reset_index()
-    fed_monthly['YEAR_MONTH'] = fed_monthly['YEAR_MONTH'] + 1
+    #fed_monthly['YEAR_MONTH'] = fed_monthly['YEAR_MONTH'] + 1
     fed_monthly = fed_monthly.rename(columns={'VALUE': 'FEDFUNDS'})
     #fed_rate['YEAR'] = pd.to_datetime(fed_rate['DATE']).dt.year
     #annual_fed = fed_rate.groupby('YEAR')['VALUE'].mean().reset_index().rename(columns={'VALUE': 'FEDFUNDS'})
@@ -98,6 +103,8 @@ def prepare_data(bank_path, unemp_path, fed_path):
     #df = df.merge(annual_fed, on='YEAR', how='left')
 
     # 5. Feature Engineering
+    df['Log_ASSET'] = np.log1p(df['QBFASSET']) 
+    df['Log_DEP'] = np.log1p(df['QBFDEP'])
     df['Deposit_to_Asset_Ratio'] = df['QBFDEP'] / df['QBFASSET']
 
     # Calculate failures per State over the last 12 months
@@ -119,27 +126,18 @@ def prepare_data(bank_path, unemp_path, fed_path):
 df_final = prepare_data(args.bank_data, args.unemp_data, args.fed_data)
 df_final = df_final.sort_values('FAILDATE').reset_index(drop=True)  
 
-#Checking balanced or imbalanced 
-if args.task == "classification":
-    df_final['LGD_class'] = (df_final['LGD'] > 0.2).astype(int)
-    counts = df_final['LGD_class'].value_counts()
-    print(f"\n=== Class Balance ===")
-    print(f"Classe 0 (LGD <= 0.2): {counts[0]} ({counts[0]/len(df_final)*100:.1f}%)")
-    print(f"Classe 1 (LGD >  0.2): {counts[1]} ({counts[1]/len(df_final)*100:.1f}%)")
-    print(f"→ Dataset balanced, no resampling needed.\n")
 
 
 # Define Features and Target
 if args.feature_set == "baseline":
     print("Using BASELINE features (Original data only)... ")
     #we take only the columns of the base dataset 
-    numerical_cols = ['QBFASSET', 'QBFDEP'] 
+    numerical_cols = ['Log_ASSET', 'Log_DEP'] 
     categorical_cols = ['CHCLASS1', 'RESTYPE1', 'SAVR', 'STATE']
-    
 elif args.feature_set == "enriched":
     print("Using enriched features (With Macro and  Engineered features)... ")
     #here we take all the columns added + base columns 
-    numerical_cols = ['QBFASSET', 'QBFDEP', 'Deposit_to_Asset_Ratio', 'State_Failures_Last_12M', 'UNRATE', 'FEDFUNDS'] #without year 
+    numerical_cols = ['Log_ASSET', 'Log_DEP', 'Deposit_to_Asset_Ratio', 'State_Failures_Last_12M', 'UNRATE', 'FEDFUNDS','CRISIS']  
     categorical_cols = ['CHCLASS1', 'RESTYPE1', 'SAVR', 'STATE']
     
 else:
@@ -156,7 +154,7 @@ if args.task == "regression":
     print("Task: REGRESSION (Target: LGD, Metric: R2)")
 
 elif args.task == "classification":
-    #df_final['LGD_class'] = (df_final['LGD'] > 0.2).astype(int)
+    df_final['LGD_class'] = (df_final['LGD'] > 0.2).astype(int)
     target_name = 'LGD_class'
     scoring_metric = 'roc_auc'
     #cv_strategy = StratifiedKFold(n_splits=args.cv_nsplits, shuffle=True, random_state=42) #shuffle for cross-validation
@@ -170,10 +168,8 @@ y = df_final[target_name]
 
 
 #Create X_train and X_test 
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
-print("\n=== Data Splits ===")
-print(f"Train set: {X_train.shape[0]} samples, {X_train.shape[1]} features")
-print(f"Test set: {X_test.shape[0]} samples, {X_test.shape[1]} features")
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.15, shuffle=False)
+
 
 # ColumnTransformer: scaling and one-hot encoding
 preprocess = ColumnTransformer([
@@ -191,16 +187,14 @@ if args.task == "regression":
     elif args.ml_method == "Ridge":
         model = Ridge()
         param_grid = {'model__alpha': [0.01, 0.1, 1, 10, 100]}
-    elif args.ml_method == "Lasso":
-        model = Lasso(max_iter=10000)
-        param_grid = {'model__alpha': [0.0001, 0.001, 0.01, 0.1, 1]}
     elif args.ml_method == "LinearRegression":
         model = LinearRegression()
         param_grid = {} 
     else:
         raise ValueError(f"Unknown regression model: {args.ml_method}")
     
-#Classification Models:
+#
+# ion Models:
 elif args.task == "classification":
     if args.ml_method == "RandomForest":
         model = RandomForestClassifier(random_state=42)
@@ -228,10 +222,21 @@ if param_grid:
     print(f"Searching for best hyperparameters ({args.cv_nsplits}-fold CV)...")
     grid_search = GridSearchCV(pipeline, param_grid=param_grid, cv=cv_strategy,scoring=scoring_metric, n_jobs=-1)
     grid_search.fit(X_train, y_train)
+    print("\n=== Scores par fold ===")
+    for i in range(args.cv_nsplits):
+        print(f"Fold {i+1}: {grid_search.cv_results_['split'+str(i)+'_test_score'][grid_search.best_index_]:.4f}")
     
     final_model = grid_search.best_estimator_
     mean_score = grid_search.best_score_
     best_params = grid_search.best_params_
+
+    if isinstance(best_params, dict):
+        best_params = {
+            k: int(v) if isinstance(v, np.integer) 
+            else float(v) if isinstance(v, np.floating) 
+            else v 
+            for k, v in best_params.items()
+        }
     
     print("\n---------Best Parameters--------")
     for key, value in best_params.items():
@@ -261,8 +266,8 @@ results = {
         "model_used": args.ml_method,
         "feature_set": args.feature_set,
         "scoring_metric": scoring_metric,
-        "mean_cv_score": mean_score,
-        "test_score": test_score, 
+        "mean_cv_score": float(mean_score),
+        "test_score": float(test_score), 
         "best_parameters": best_params
     }
 
@@ -277,3 +282,4 @@ RESET = '\033[0m'
 print(f"\n{GREEN}--> Success:{RESET} Model and logs saved in: {out_dir}")
 print(f"{BLUE}-->{RESET} Final CV Score ({scoring_metric}): {mean_score:.4f}")
 print(f"{BLUE}-->{RESET} Final TEST Score: {test_score:.4f}\n")
+
